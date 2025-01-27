@@ -3,16 +3,19 @@ package pagerduty
 import (
 	"fmt"
 	"log"
+	"net/http"
 	"strings"
 	"time"
 
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/retry"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 	"github.com/heimweh/go-pagerduty/pagerduty"
 )
 
-const AppBaseUrl = "https://app.pagerduty.com"
-const StarWildcardConfig = "*"
+const (
+	AppBaseUrl         = "https://app.pagerduty.com"
+	StarWildcardConfig = "*"
+)
 
 func resourcePagerDutySlackConnection() *schema.Resource {
 	return &schema.Resource{
@@ -35,7 +38,7 @@ func resourcePagerDutySlackConnection() *schema.Resource {
 			"source_type": {
 				Type:     schema.TypeString,
 				Required: true,
-				ValidateFunc: validateValueFunc([]string{
+				ValidateDiagFunc: validateValueDiagFunc([]string{
 					"service_reference",
 					"team_reference",
 				}),
@@ -56,7 +59,7 @@ func resourcePagerDutySlackConnection() *schema.Resource {
 			"notification_type": {
 				Type:     schema.TypeString,
 				Required: true,
-				ValidateFunc: validateValueFunc([]string{
+				ValidateDiagFunc: validateValueDiagFunc([]string{
 					"responder",
 					"stakeholder",
 				}),
@@ -83,7 +86,7 @@ func resourcePagerDutySlackConnection() *schema.Resource {
 						"urgency": {
 							Type:     schema.TypeString,
 							Optional: true,
-							ValidateFunc: validateValueFunc([]string{
+							ValidateDiagFunc: validateValueDiagFunc([]string{
 								"high",
 								"low",
 							}),
@@ -115,16 +118,15 @@ func resourcePagerDutySlackConnectionCreate(d *schema.ResourceData, meta interfa
 		return err
 	}
 
-	retryErr := resource.Retry(2*time.Minute, func() *resource.RetryError {
-
+	retryErr := retry.Retry(2*time.Minute, func() *retry.RetryError {
 		slackConn, err := buildSlackConnectionStruct(d)
 		if err != nil {
-			return resource.NonRetryableError(err)
+			return retry.NonRetryableError(err)
 		}
 		log.Printf("[INFO] Creating PagerDuty slack connection for source %s and slack channel %s", slackConn.SourceID, slackConn.ChannelID)
 
 		if slackConn, _, err = client.SlackConnections.Create(slackConn.WorkspaceID, slackConn); err != nil {
-			return resource.RetryableError(err)
+			return retry.RetryableError(err)
 		} else if slackConn != nil {
 			d.SetId(slackConn.ID)
 			d.Set("workspace_id", slackConn.WorkspaceID)
@@ -149,9 +151,13 @@ func resourcePagerDutySlackConnectionRead(d *schema.ResourceData, meta interface
 	workspaceID := d.Get("workspace_id").(string)
 	log.Printf("[DEBUG] Read Slack Connection: workspace_id %s", workspaceID)
 
-	retryErr := resource.Retry(2*time.Minute, func() *resource.RetryError {
+	retryErr := retry.Retry(2*time.Minute, func() *retry.RetryError {
 		if slackConn, _, err := client.SlackConnections.Get(workspaceID, d.Id()); err != nil {
-			return resource.RetryableError(err)
+			if isErrCode(err, http.StatusBadRequest) {
+				return retry.NonRetryableError(err)
+			}
+
+			return retry.RetryableError(err)
 		} else if slackConn != nil {
 			d.Set("source_id", slackConn.SourceID)
 			d.Set("source_name", slackConn.SourceName)
@@ -236,11 +242,11 @@ func expandConfigList(v interface{}) []string {
 	return items
 }
 
-//Expands the use of star wildcard ("*") configuration for an attribute to its
-//matching expected value by PagerDuty's API, which is nil. This is necessary
-//when the API accepts and interprets nil and empty configurations as valid
-//settings. The state produced by this kind of config can be reverted to the API
-//expected values with sibbling function `flattenStarWildcardConfig`.
+// Expands the use of star wildcard ("*") configuration for an attribute to its
+// matching expected value by PagerDuty's API, which is nil. This is necessary
+// when the API accepts and interprets nil and empty configurations as valid
+// settings. The state produced by this kind of config can be reverted to the API
+// expected values with sibbling function `flattenStarWildcardConfig`.
 func expandStarWildcardConfig(c []string) []string {
 	if isUsingStarWildcardConfig := len(c) == 1 && c[0] == StarWildcardConfig; isUsingStarWildcardConfig {
 		c = nil

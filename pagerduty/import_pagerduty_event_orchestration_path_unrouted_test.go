@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/acctest"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/terraform"
+	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
+	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/terraform"
 )
 
 func TestAccPagerDutyEventOrchestrationPathUnrouted_import(t *testing.T) {
@@ -28,6 +28,11 @@ func TestAccPagerDutyEventOrchestrationPathUnrouted_import(t *testing.T) {
 				ImportStateIdFunc: testAccCheckPagerDutyEventOrchestrationPathUnroutedID,
 				ImportState:       true,
 				ImportStateVerify: true,
+				ImportStateVerifyIgnore: []string{
+					"set.0.rule.0.id",
+					"set.1.rule.0.id",
+					"set.1.rule.1.id",
+				},
 			},
 		},
 	})

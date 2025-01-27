@@ -3,14 +3,16 @@ package pagerduty
 import (
 	"fmt"
 	"log"
+	"net/http"
 	"strings"
 	"time"
 
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/retry"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 	"github.com/heimweh/go-pagerduty/pagerduty"
 )
 
+// Deprecated: Migrated to pagerdutyplugin.dataSourceIntegration. Kept for testing purposes.
 func dataSourcePagerDutyServiceIntegration() *schema.Resource {
 	return &schema.Resource{
 		Read: dataSourcePagerDutyServiceIntegrationRead,
@@ -49,9 +51,13 @@ func dataSourcePagerDutyServiceIntegrationRead(d *schema.ResourceData, meta inte
 		Query: searchName,
 	}
 
-	return resource.Retry(5*time.Minute, func() *resource.RetryError {
+	return retry.Retry(5*time.Minute, func() *retry.RetryError {
 		resp, _, err := client.Services.List(o)
 		if err != nil {
+			if isErrCode(err, http.StatusBadRequest) {
+				return retry.NonRetryableError(err)
+			}
+
 			return handleError(err)
 		}
 
@@ -65,7 +71,7 @@ func dataSourcePagerDutyServiceIntegrationRead(d *schema.ResourceData, meta inte
 		}
 
 		if found == nil {
-			return resource.NonRetryableError(
+			return retry.NonRetryableError(
 				fmt.Errorf("unable to locate any service with the name: %s", searchName),
 			)
 		}
@@ -83,15 +89,14 @@ func dataSourcePagerDutyServiceIntegrationRead(d *schema.ResourceData, meta inte
 
 				return nil
 			}
-
 		}
-		return resource.NonRetryableError(
+		return retry.NonRetryableError(
 			fmt.Errorf("unable to locate any integration of type %s on service %s", integrationSummary, searchName),
 		)
 	})
 }
 
-func handleError(err error) *resource.RetryError {
+func handleError(err error) *retry.RetryError {
 	time.Sleep(30 * time.Second)
-	return resource.RetryableError(err)
+	return retry.RetryableError(err)
 }

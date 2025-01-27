@@ -3,10 +3,11 @@ package pagerduty
 import (
 	"fmt"
 	"log"
+	"net/http"
 	"strings"
 	"time"
 
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/retry"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 	"github.com/heimweh/go-pagerduty/pagerduty"
 )
@@ -236,9 +237,13 @@ func resourcePagerDutyResponsePlayCreate(d *schema.ResourceData, meta interface{
 
 	log.Printf("[INFO] Creating PagerDuty response play: %s", responsePlay.ID)
 
-	retryErr := resource.Retry(2*time.Minute, func() *resource.RetryError {
+	retryErr := retry.Retry(2*time.Minute, func() *retry.RetryError {
 		if responsePlay, _, err := client.ResponsePlays.Create(responsePlay); err != nil {
-			return resource.RetryableError(err)
+			if isErrCode(err, http.StatusBadRequest) {
+				return retry.NonRetryableError(err)
+			}
+
+			return retry.RetryableError(err)
 		} else if responsePlay != nil {
 			d.SetId(responsePlay.ID)
 			d.Set("from", responsePlay.FromEmail)
@@ -262,21 +267,25 @@ func resourcePagerDutyResponsePlayRead(d *schema.ResourceData, meta interface{})
 	from := d.Get("from").(string)
 	log.Printf("[INFO] Reading PagerDuty response play: %s (from: %s)", d.Id(), from)
 
-	return resource.Retry(2*time.Minute, func() *resource.RetryError {
+	return retry.Retry(2*time.Minute, func() *retry.RetryError {
 		if responsePlay, _, err := client.ResponsePlays.Get(d.Id(), from); err != nil {
+			if isErrCode(err, http.StatusBadRequest) {
+				return retry.NonRetryableError(err)
+			}
+
 			time.Sleep(2 * time.Second)
-			return resource.RetryableError(err)
+			return retry.RetryableError(err)
 		} else if responsePlay != nil {
 			if responsePlay.Team != nil {
 				d.Set("team", []interface{}{responsePlay.Team})
 			}
 			log.Printf("[INFO] Read PagerDuty response play initial subscribers: %s", d.Get("subscriber"))
 			if err := d.Set("subscriber", flattenSubscribers(responsePlay.Subscribers)); err != nil {
-				return resource.NonRetryableError(err)
+				return retry.NonRetryableError(err)
 			}
 			log.Printf("[INFO] Read PagerDuty response play initial responders: %s", d.Get("responder"))
 			if err := d.Set("responder", flattenResponders(responsePlay.Responders)); err != nil {
-				return resource.NonRetryableError(err)
+				return retry.NonRetryableError(err)
 			}
 			d.Set("from", from)
 			d.Set("name", responsePlay.Name)
@@ -303,9 +312,13 @@ func resourcePagerDutyResponsePlayUpdate(d *schema.ResourceData, meta interface{
 
 	log.Printf("[INFO] Updating PagerDuty response play: %s", d.Id())
 
-	retryErr := resource.Retry(30*time.Second, func() *resource.RetryError {
+	retryErr := retry.Retry(2*time.Minute, func() *retry.RetryError {
 		if _, _, err := client.ResponsePlays.Update(d.Id(), responsePlay); err != nil {
-			return resource.RetryableError(err)
+			if isErrCode(err, http.StatusBadRequest) {
+				return retry.NonRetryableError(err)
+			}
+
+			return retry.RetryableError(err)
 		}
 		return nil
 	})
@@ -325,9 +338,13 @@ func resourcePagerDutyResponsePlayDelete(d *schema.ResourceData, meta interface{
 	log.Printf("[INFO] Deleting PagerDuty response play: %s", d.Id())
 	from := d.Get("from").(string)
 
-	retryErr := resource.Retry(30*time.Second, func() *resource.RetryError {
+	retryErr := retry.Retry(2*time.Minute, func() *retry.RetryError {
 		if _, err := client.ResponsePlays.Delete(d.Id(), from); err != nil {
-			return resource.RetryableError(err)
+			if isErrCode(err, http.StatusBadRequest) {
+				return retry.NonRetryableError(err)
+			}
+
+			return retry.RetryableError(err)
 		}
 		return nil
 	})
@@ -429,7 +446,7 @@ func flattenResponders(rlist []*pagerduty.Responder) []interface{} {
 		// EscalationRules
 		if r.EscalationRules != nil {
 			// flattenEscalationRules in resource_pagerduty_escalation_policy
-			flattenedR["escalation_rules"] = flattenEscalationRules(r.EscalationRules)
+			flattenedR["escalation_rules"] = flattenEscalationRules(r.EscalationRules, nil)
 		}
 		// Services
 		if r.Services != nil {

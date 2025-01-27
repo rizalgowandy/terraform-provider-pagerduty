@@ -49,7 +49,7 @@ resource "pagerduty_escalation_policy" "example" {
 The following arguments are supported:
 
 * `name` - (Required) The name of the escalation policy.
-* `teams` - (Optional) Teams associated with the policy. Account must have the `teams` ability to use this parameter.
+* `teams` - (Optional) Team associated with the policy (Only 1 team can be assigned to an Escalation Policy). Account must have the `teams` ability to use this parameter.
 * `description` - (Optional) A human-friendly description of the escalation policy.
   If not set, a placeholder of "Managed by Terraform" will be set.
 * `num_loops` - (Optional) The number of times the escalation policy will repeat after reaching the end of its escalation.
@@ -58,7 +58,12 @@ The following arguments are supported:
 Escalation rules (`rule`) supports the following:
 
   * `escalation_delay_in_minutes` - (Required) The number of minutes before an unacknowledged incident escalates away from this rule.
+  * `escalation_rule_assignment_strategy` - (Optional) The strategy used to assign the escalation rule to an incident. Documented below.
   * `targets` - (Required) A target block. Target blocks documented below.
+
+Incident assignment strategy for Escalation Rule (`escalation_rule_assignment_strategy`) supports the following:
+
+* `type` - (Optional) Can be `round_robin` or `assign_to_everyone`.
 
 Targets (`target`) supports the following:
 

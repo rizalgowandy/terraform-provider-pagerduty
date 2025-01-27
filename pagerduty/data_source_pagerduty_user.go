@@ -3,9 +3,10 @@ package pagerduty
 import (
 	"fmt"
 	"log"
+	"net/http"
 	"time"
 
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/retry"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 	"github.com/heimweh/go-pagerduty/pagerduty"
 )
@@ -22,6 +23,22 @@ func dataSourcePagerDutyUser() *schema.Resource {
 			"email": {
 				Type:     schema.TypeString,
 				Required: true,
+			},
+			"role": {
+				Type:     schema.TypeString,
+				Computed: true,
+			},
+			"job_title": {
+				Type:     schema.TypeString,
+				Computed: true,
+			},
+			"time_zone": {
+				Type:     schema.TypeString,
+				Computed: true,
+			},
+			"description": {
+				Type:     schema.TypeString,
+				Computed: true,
 			},
 		},
 	}
@@ -41,13 +58,17 @@ func dataSourcePagerDutyUserRead(d *schema.ResourceData, meta interface{}) error
 		Query: searchEmail,
 	}
 
-	return resource.Retry(5*time.Minute, func() *resource.RetryError {
+	return retry.Retry(5*time.Minute, func() *retry.RetryError {
 		resp, err := client.Users.ListAll(o)
 		if err != nil {
+			if isErrCode(err, http.StatusBadRequest) {
+				return retry.NonRetryableError(err)
+			}
+
 			// Delaying retry by 30s as recommended by PagerDuty
 			// https://developer.pagerduty.com/docs/rest-api-v2/rate-limiting/#what-are-possible-workarounds-to-the-events-api-rate-limit
 			time.Sleep(30 * time.Second)
-			return resource.RetryableError(err)
+			return retry.RetryableError(err)
 		}
 
 		var found *pagerduty.FullUser
@@ -60,7 +81,7 @@ func dataSourcePagerDutyUserRead(d *schema.ResourceData, meta interface{}) error
 		}
 
 		if found == nil {
-			return resource.NonRetryableError(
+			return retry.NonRetryableError(
 				fmt.Errorf("Unable to locate any user with the email: %s", searchEmail),
 			)
 		}
@@ -68,6 +89,10 @@ func dataSourcePagerDutyUserRead(d *schema.ResourceData, meta interface{}) error
 		d.SetId(found.ID)
 		d.Set("name", found.Name)
 		d.Set("email", found.Email)
+		d.Set("role", found.Role)
+		d.Set("job_title", found.JobTitle)
+		d.Set("time_zone", found.TimeZone)
+		d.Set("description", found.Description)
 
 		return nil
 	})

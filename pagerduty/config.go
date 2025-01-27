@@ -1,13 +1,17 @@
 package pagerduty
 
 import (
+	"crypto/tls"
 	"fmt"
 	"log"
 	"net/http"
 	"sync"
+	"time"
 
+	"github.com/PagerDuty/terraform-provider-pagerduty/util"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/logging"
 	"github.com/heimweh/go-pagerduty/pagerduty"
+	"github.com/heimweh/go-pagerduty/persistentconfig"
 )
 
 // Config defines the configuration options for the PagerDuty client
@@ -35,6 +39,15 @@ type Config struct {
 	// UserAgent for API Client
 	UserAgent string
 
+	// Do not verify TLS certs for HTTPS requests - useful if you're behind a corporate proxy
+	InsecureTls bool
+
+	APITokenType *pagerduty.AuthTokenType
+
+	AppOauthScopedTokenParams *persistentconfig.AppOauthScopedTokenParams
+
+	ServiceRegion string
+
 	client      *pagerduty.Client
 	slackClient *pagerduty.Client
 }
@@ -57,25 +70,40 @@ func (c *Config) Client() (*pagerduty.Client, error) {
 	}
 
 	// Validate that the PagerDuty token is set
-	if c.Token == "" {
+	if c.Token == "" && c.APITokenType != nil && *c.APITokenType == pagerduty.AuthTokenTypeAPIToken {
 		return nil, fmt.Errorf(invalidCreds)
 	}
 
 	var httpClient *http.Client
 	httpClient = http.DefaultClient
-	httpClient.Transport = logging.NewTransport("PagerDuty", http.DefaultTransport)
+	httpClient.Timeout = 30 * time.Second
 
-	var apiUrl = c.ApiUrl
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if c.InsecureTls {
+		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+	}
+	httpClient.Transport = logging.NewTransport("PagerDuty", transport)
+
+	apiUrl := c.ApiUrl
 	if c.ApiUrlOverride != "" {
 		apiUrl = c.ApiUrlOverride
 	}
 
 	config := &pagerduty.Config{
-		BaseURL:    apiUrl,
-		Debug:      logging.IsDebugOrHigher(),
-		HTTPClient: httpClient,
-		Token:      c.Token,
-		UserAgent:  c.UserAgent,
+		BaseURL:                   apiUrl,
+		Debug:                     logging.IsDebugOrHigher(),
+		HTTPClient:                httpClient,
+		Token:                     c.Token,
+		UserAgent:                 c.UserAgent,
+		AppOauthScopedTokenParams: c.AppOauthScopedTokenParams,
+		APIAuthTokenType:          c.APITokenType,
+	}
+
+	if util.UserAgentAppend != "" {
+		if config.UserAgent == "" {
+			config.UserAgent = "heimweh/go-pagerduty(terraform)"
+		}
+		config.UserAgent += " " + util.UserAgentAppend
 	}
 
 	client, err := pagerduty.NewClient(config)
@@ -114,7 +142,13 @@ func (c *Config) SlackClient() (*pagerduty.Client, error) {
 
 	var httpClient *http.Client
 	httpClient = http.DefaultClient
-	httpClient.Transport = logging.NewTransport("PagerDuty", http.DefaultTransport)
+	httpClient.Timeout = 30 * time.Second
+
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if c.InsecureTls {
+		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+	}
+	httpClient.Transport = logging.NewTransport("PagerDuty", transport)
 
 	config := &pagerduty.Config{
 		BaseURL:    c.AppUrl,
@@ -122,6 +156,13 @@ func (c *Config) SlackClient() (*pagerduty.Client, error) {
 		HTTPClient: httpClient,
 		Token:      c.UserToken,
 		UserAgent:  c.UserAgent,
+	}
+
+	if util.UserAgentAppend != "" {
+		if config.UserAgent == "" {
+			config.UserAgent = "heimweh/go-pagerduty(terraform)"
+		}
+		config.UserAgent += " " + util.UserAgentAppend
 	}
 
 	client, err := pagerduty.NewClient(config)

@@ -10,13 +10,13 @@ description: |-
 
 A [Service Orchestration](https://support.pagerduty.com/docs/event-orchestration#service-orchestrations) allows you to create a set of Event Rules. The Service Orchestration evaluates Events sent to this Service against each of its rules, beginning with the rules in the "start" set. When a matching rule is found, it can modify and enhance the event and can route the event to another set of rules within this Service Orchestration for further processing.
 
-**Note:** If you have a Service that uses [Service Event Rules](https://support.pagerduty.com/docs/rulesets#service-event-rules), you can switch to [Service Orchestrations](https://support.pagerduty.com/docs/event-orchestration#service-orchestrations) at any time. Please read the [Switch to Service Orchestrations](https://support.pagerduty.com/docs/event-orchestration#switch-to-service-orchestrations) instructions for more information.
+-> If you have a Service that uses [Service Event Rules](https://support.pagerduty.com/docs/rulesets#service-event-rules), you can switch to [Service Orchestrations](https://support.pagerduty.com/docs/event-orchestration#service-orchestrations) at any time setting the attribute `enable_event_orchestration_for_service` to `true`. Please read the [Switch to Service Orchestrations](https://support.pagerduty.com/docs/event-orchestration#switch-to-service-orchestrations) instructions for more information.
 
 ## Example of configuring a Service Orchestration
 
 This example shows creating `Team`, `User`, `Escalation Policy`, and `Service` resources followed by creating a Service Orchestration to handle Events sent to that Service.
 
-This example also shows using `priority` [data source](https://registry.terraform.io/providers/PagerDuty/pagerduty/latest/docs/data-sources/priority) to configure `priority` action for a rule. If the Event matches the first rule in set "step-two" the resulting incident will have the Priority `P1`.
+This example also shows using the [pagerduty_priority](https://registry.terraform.io/providers/PagerDuty/pagerduty/latest/docs/data-sources/priority) and [pagerduty_escalation_policy](https://registry.terraform.io/providers/PagerDuty/pagerduty/latest/docs/data-sources/escalation_policy) data sources to configure `priority` and `escalation_policy` actions for a rule.
 
 This example shows a Service Orchestration that has nested sets: a rule in the "start" set has a `route_to` action pointing at the "step-two" set.
 
@@ -31,17 +31,22 @@ resource "pagerduty_team" "engineering" {
 resource "pagerduty_user" "example" {
   name  = "Earline Greenholt"
   email = "125.greenholt.earline@graham.name"
-  teams = [pagerduty_team.engineering.id]
 }
 
-resource "pagerduty_escalation_policy" "foo" {
+resource "pagerduty_team_membership" "foo" {
+  user_id = pagerduty_user.example.id
+  team_id = pagerduty_team.engineering.id
+  role    = "manager"
+}
+
+resource "pagerduty_escalation_policy" "example" {
   name      = "Engineering Escalation Policy"
   num_loops = 2
 
   rule {
     escalation_delay_in_minutes = 10
     target {
-      type = "user"
+      type = "user_reference"
       id   = pagerduty_user.example.id
     }
   }
@@ -55,12 +60,23 @@ resource "pagerduty_service" "example" {
   alert_creation          = "create_alerts_and_incidents"
 }
 
+resource "pagerduty_incident_custom_field" "cs_impact" {
+  name       = "impact"
+  data_type  = "string"
+  field_type = "single_value"
+}
+
 data "pagerduty_priority" "p1" {
   name = "P1"
 }
 
+data "pagerduty_escalation_policy" "sre_esc_policy" {
+  name = "SRE Escalation Policy"
+}
+
 resource "pagerduty_event_orchestration_service" "www" {
   service = pagerduty_service.example.id
+  enable_event_orchestration_for_service = true
   set {
     id = "start"
     rule {
@@ -98,6 +114,19 @@ resource "pagerduty_event_orchestration_service" "www" {
       actions {
         annotate = "Please use our P1 runbook: https://docs.test/p1-runbook"
         priority = data.pagerduty_priority.p1.id
+        incident_custom_field_update {
+          id = pagerduty_incident_custom_field.cs_impact.id
+          value = "High Impact"
+        }
+      }
+    }
+    rule {
+      label = "If any of the API apps are unavailable, page the SRE team"
+      condition {
+        expression = "event.custom_details.service_name matches part '-api' and event.custom_details.status_code matches '502'"
+      }
+      actions {
+        escalation_policy = data.pagerduty_escalation_policy.sre_esc_policy.id
       }
     }
     rule {
@@ -146,6 +175,7 @@ resource "pagerduty_event_orchestration_service" "www" {
 The following arguments are supported:
 
 * `service` - (Required) ID of the Service to which this Service Orchestration belongs to.
+* `enable_event_orchestration_for_service` - (Optional) Opt-in/out for switching the Service to [Service Orchestrations](https://support.pagerduty.com/docs/event-orchestration#service-orchestrations).
 * `set` - (Required) A Service Orchestration must contain at least a "start" set, but can contain any number of additional sets that are routed to by other rules to form a directional graph.
 * `catch_all` - (Required) the `catch_all` actions will be applied if an Event reaches the end of any set without matching any rules in that set.
 
@@ -163,11 +193,15 @@ The following arguments are supported:
 * `expression`- (Required) A [PCL condition](https://developer.pagerduty.com/docs/ZG9jOjM1NTE0MDc0-pcl-overview) string.
 
 ### Actions (`actions`) supports the following:
-* `route_to` - (Optional) The ID of a Set from this Service Orchestration whose rules you also want to use with event that match this rule.
+* `route_to` - (Optional) The ID of a Set from this Service Orchestration whose rules you also want to use with events that match this rule.
 * `suppress` - (Optional) Set whether the resulting alert is suppressed. Suppressed alerts will not trigger an incident.
-* `suspend` - (Optional) The number of seconds to suspend the resulting alert before triggering. This effectively pauses incident notifications. If a `resolve` event arrives before the alert triggers then PagerDuty won't create an incident for this the resulting alert.
+* `suspend` - (Optional) The number of seconds to suspend the resulting alert before triggering. This effectively pauses incident notifications. If a `resolve` event arrives before the alert triggers then PagerDuty won't create an incident for this alert.
 * `priority` - (Optional) The ID of the priority you want to set on resulting incident. Consider using the [`pagerduty_priority`](https://registry.terraform.io/providers/PagerDuty/pagerduty/latest/docs/data-sources/priority) data source.
+* `escalation_policy` - (Optional) The ID of the Escalation Policy you want to assign incidents to. Event rules with this action will override the Escalation Policy already set on a Service's settings, with what is configured by this action.
 * `annotate` - (Optional) Add this text as a note on the resulting incident.
+* `incident_custom_field_update` - (Optional) Assign a custom field to the resulting incident.
+  * `id` - (Required) The custom field id
+  * `value` - (Required) The value to assign to this custom field
 * `pagerduty_automation_action` - (Optional) Configure a [Process Automation](https://support.pagerduty.com/docs/event-orchestration#process-automation) associated with the resulting incident.
   * `action_id` - (Required) Id of the Process Automation action to be triggered.
 * `automation_action` - (Optional) Create a [Webhook](https://support.pagerduty.com/docs/event-orchestration#webhooks) associated with the resulting incident.

@@ -2,13 +2,15 @@ package pagerduty
 
 import (
 	"log"
+	"net/http"
 	"time"
 
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/retry"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 	"github.com/heimweh/go-pagerduty/pagerduty"
 )
 
+// Deprecated: Migrated to pagerdutyplugin.resourceBusinessService. Kept for testing purposes.
 func resourcePagerDutyBusinessService() *schema.Resource {
 	return &schema.Resource{
 		Create: resourcePagerDutyBusinessServiceCreate,
@@ -45,7 +47,7 @@ func resourcePagerDutyBusinessService() *schema.Resource {
 				Optional:   true,
 				Default:    "business_service",
 				Deprecated: "This will change to a computed resource in the next major release.",
-				ValidateFunc: validateValueFunc([]string{
+				ValidateDiagFunc: validateValueDiagFunc([]string{
 					"business_service",
 				}),
 			},
@@ -98,15 +100,14 @@ func resourcePagerDutyBusinessServiceCreate(d *schema.ResourceData, meta interfa
 		return err
 	}
 
-	retryErr := resource.Retry(5*time.Minute, func() *resource.RetryError {
-
+	retryErr := retry.Retry(5*time.Minute, func() *retry.RetryError {
 		businessService, err := buildBusinessServiceStruct(d)
 		if err != nil {
-			return resource.NonRetryableError(err)
+			return retry.NonRetryableError(err)
 		}
 		log.Printf("[INFO] Creating PagerDuty business service %s", businessService.Name)
 		if businessService, _, err = client.BusinessServices.Create(businessService); err != nil {
-			return resource.RetryableError(err)
+			return retry.RetryableError(err)
 		} else if businessService != nil {
 			d.SetId(businessService.ID)
 		}
@@ -128,9 +129,17 @@ func resourcePagerDutyBusinessServiceRead(d *schema.ResourceData, meta interface
 
 	log.Printf("[INFO] Reading PagerDuty business service %s", d.Id())
 
-	retryErr := resource.Retry(5*time.Minute, func() *resource.RetryError {
+	retryErr := retry.Retry(5*time.Minute, func() *retry.RetryError {
 		if businessService, _, err := client.BusinessServices.Get(d.Id()); err != nil {
-			return resource.RetryableError(err)
+			if isErrCode(err, http.StatusBadRequest) {
+				return retry.NonRetryableError(err)
+			}
+
+			if err := handleNotFoundError(err, d); err == nil {
+				return nil
+			}
+
+			return retry.RetryableError(err)
 		} else if businessService != nil {
 			d.Set("name", businessService.Name)
 			d.Set("html_url", businessService.HTMLUrl)
@@ -185,7 +194,7 @@ func resourcePagerDutyBusinessServiceDelete(d *schema.ResourceData, meta interfa
 	log.Printf("[INFO] Deleting PagerDuty business service %s", d.Id())
 
 	if _, err := client.BusinessServices.Delete(d.Id()); err != nil {
-		return err
+		return handleNotFoundError(err, d)
 	}
 
 	d.SetId("")

@@ -2,14 +2,14 @@ package pagerduty
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/retry"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 	"github.com/heimweh/go-pagerduty/pagerduty"
 )
@@ -23,19 +23,7 @@ func resourcePagerDutyUserContactMethod() *schema.Resource {
 		Importer: &schema.ResourceImporter{
 			State: resourcePagerDutyUserContactMethodImport,
 		},
-		CustomizeDiff: func(context context.Context, diff *schema.ResourceDiff, i interface{}) error {
-			a := diff.Get("address").(string)
-			t := diff.Get("type").(string)
-			if t == "sms_contact_method" || t == "phone_contact_method" {
-				if strings.HasPrefix(a, "0") {
-					return errors.New("phone numbers starting with a 0 are not supported")
-				}
-				if _, err := strconv.Atoi(a); err != nil {
-					return errors.New("phone numbers should only contain digits")
-				}
-			}
-			return nil
-		},
+		CustomizeDiff: customizeDiffResourceUserContactMethod,
 		Schema: map[string]*schema.Schema{
 			"user_id": {
 				Type:     schema.TypeString,
@@ -45,7 +33,7 @@ func resourcePagerDutyUserContactMethod() *schema.Resource {
 			"type": {
 				Type:     schema.TypeString,
 				Required: true,
-				ValidateFunc: validateValueFunc([]string{
+				ValidateDiagFunc: validateValueDiagFunc([]string{
 					"email_contact_method",
 					"phone_contact_method",
 					"push_notification_contact_method",
@@ -62,6 +50,7 @@ func resourcePagerDutyUserContactMethod() *schema.Resource {
 			"country_code": {
 				Type:     schema.TypeInt,
 				Optional: true,
+				Computed: true,
 			},
 
 			"enabled": {
@@ -85,6 +74,47 @@ func resourcePagerDutyUserContactMethod() *schema.Resource {
 			},
 		},
 	}
+}
+
+func customizeDiffResourceUserContactMethod(context context.Context, diff *schema.ResourceDiff, i interface{}) error {
+	a := diff.Get("address").(string)
+	t := diff.Get("type").(string)
+	c := diff.Get("country_code").(int)
+
+	if t == "sms_contact_method" || t == "phone_contact_method" {
+		// Validation logic based on https://support.pagerduty.com/docs/user-profile#phone-number-formatting
+		maxLength := 40
+		if len(a) > maxLength {
+			return fmt.Errorf("phone numbers may not exceed 40 characters")
+		}
+		for _, char := range a {
+			isAllowedChar := char == ',' || char == '*' || char == '#'
+			if _, err := strconv.ParseInt(string(char), 10, 64); err != nil && !isAllowedChar {
+				return fmt.Errorf("phone numbers may only include digits from 0-9 and the symbols: comma (,), asterisk (*), and pound (#)")
+			}
+		}
+
+		isMexicoNumber := c == 52
+		if t == "sms_contact_method" && isMexicoNumber && strings.HasPrefix(a, "1") {
+			return fmt.Errorf("Mexico-based SMS numbers should be free of area code prefixes, so please remove the leading 1 in the number %q", a)
+		}
+
+		isTrunkPrefixNotSupported := map[int]string{
+			33: "0", // France (33-0)
+			40: "0", // Romania (40-0)
+			44: "0", // UK (44-0)
+			45: "0", // Denmark (45-0)
+			49: "0", // Germany (49-0)
+			61: "0", // Australia (61-0)
+			66: "0", // Thailand (66-0)
+			91: "0", // India (91-0)
+			1:  "1", // North America (1-1)
+		}
+		if prefix, ok := isTrunkPrefixNotSupported[c]; ok && strings.HasPrefix(a, prefix) {
+			return fmt.Errorf("Trunk prefixes are not supported for following countries and regions: France, Romania, UK, Denmark, Germany, Australia, Thailand, India and North America, so must be formatted for international use without the leading %s", prefix)
+		}
+	}
+	return nil
 }
 
 func buildUserContactMethodStruct(d *schema.ResourceData) *pagerduty.ContactMethod {
@@ -117,13 +147,17 @@ func fetchPagerDutyUserContactMethod(d *schema.ResourceData, meta interface{}, e
 
 	userID := d.Get("user_id").(string)
 
-	return resource.Retry(2*time.Minute, func() *resource.RetryError {
+	return retry.Retry(2*time.Minute, func() *retry.RetryError {
 		resp, _, err := client.Users.GetContactMethod(userID, d.Id())
 		if err != nil {
+			if isErrCode(err, http.StatusBadRequest) {
+				return retry.NonRetryableError(err)
+			}
+
 			errResp := handleNotFoundError(err, d)
 			if errResp != nil {
 				time.Sleep(2 * time.Second)
-				return resource.RetryableError(errResp)
+				return retry.RetryableError(errResp)
 			}
 
 			return nil

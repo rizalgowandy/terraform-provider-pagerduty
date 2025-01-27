@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/acctest"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/terraform"
+	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
+	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/terraform"
 	"github.com/heimweh/go-pagerduty/pagerduty"
 )
 
@@ -218,4 +218,19 @@ resource "pagerduty_maintenance_window" "foo" {
   services    = [pagerduty_service.foo.id, pagerduty_service.foo2.id]
 }
 `, desc, start, end)
+}
+
+func testAccCheckPagerDutyAddonDestroy(s *terraform.State) error {
+	client, _ := testAccProvider.Meta().(*Config).Client()
+	for _, r := range s.RootModule().Resources {
+		if r.Type != "pagerduty_addon" {
+			continue
+		}
+
+		if _, _, err := client.Addons.Get(r.Primary.ID); err == nil {
+			return fmt.Errorf("Add-on still exists")
+		}
+
+	}
+	return nil
 }

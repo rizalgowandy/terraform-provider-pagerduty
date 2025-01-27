@@ -59,7 +59,7 @@ The following arguments are supported:
 
   * `source_id` - (Required) The ID of the source in PagerDuty. Valid sources are services or teams.
   * `source_type` - (Required) The type of the source. Either `team_reference` or `service_reference`.
-  * `workspace_id` - (Required) The ID of the connected Slack workspace. Can also be defined by the `SLACK_CONNECTION_WORKSPACE_ID` environment variable.
+  * `workspace_id` - (Required) The slack team (workspace) ID of the connected Slack workspace. Can also be defined by the `SLACK_CONNECTION_WORKSPACE_ID` environment variable.
   * `channel_id` - (Required) The ID of a Slack channel in the workspace.
   * `config` - (Required) Configuration options for the Slack connection that provide options to filter events.
   * `notification_type` - (Required) Type of notification. Either `responder` or `stakeholder`.
@@ -80,9 +80,9 @@ The following arguments are supported:
     - `incident.status_update_published`
     - `incident.reopened`
   * `priorities` - (Optional) Allows you to filter events by priority. Needs to be an array of PagerDuty priority IDs. Available through [pagerduty_priority](https://registry.terraform.io/providers/PagerDuty/pagerduty/latest/docs/data-sources/priority) data source.
-    - When omitted or set to an empty array (`[]`) in the configuration for a Slack Connection, its default behaviour is to set `priorities` to `No Priority` value.
+    - When omitted or set to an empty array (`[]`) in the configuration for a Slack Connection, its default behavior is to set `priorities` to `No Priority` value.
     - When set to `["*"]` its corresponding value for `priorities` in Slack Connection's configuration will be `Any Priority`.
-  * `urgency` - (Optional) Allows you to filter events by urgency. Either `high` or `low`.
+  * `urgency` - (Optional) Allows you to filter events by urgency. Either `high`, `low` or `null` for Any urgency. Default is `null`.
 
 ## Attributes Reference
 

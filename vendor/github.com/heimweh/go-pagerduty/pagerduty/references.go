@@ -19,11 +19,17 @@ type UserReference resourceReference
 // EscalationPolicyReference represents a reference to an escalation policy.
 type EscalationPolicyReference resourceReference
 
+// ResponsePlayReference represents a reference to a response play.
+type ResponsePlayReference resourceReference
+
 // ScheduleReference represents a reference to a schedule.
 type ScheduleReference resourceReference
 
 // TeamReference represents a reference to a team.
 type TeamReference resourceReference
+
+// LicenseReference represents a reference to a team.
+type LicenseReference resourceReference
 
 // ContactMethodReference represents a reference to a contact method.
 type ContactMethodReference resourceReference
@@ -51,3 +57,11 @@ type RulesetReference resourceReference
 
 // SubscriberReference represents a reference to a subscriber schema
 type SubscriberReference resourceReference
+
+// IncidentAttributeReference represents a reference to a Incident
+// Attribute schema
+type IncidentAttributeReference resourceReference
+
+// CustomFieldSchemaReference represents a reference to a Custom
+// Field schema
+type CustomFieldSchemaReference resourceReference

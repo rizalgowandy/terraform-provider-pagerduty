@@ -4,11 +4,14 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"regexp"
+	"net/http"
 	"strconv"
 	"time"
 
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
+	"github.com/PagerDuty/terraform-provider-pagerduty/util"
+	"github.com/hashicorp/go-cty/cty"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/retry"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/validation"
 	"github.com/heimweh/go-pagerduty/pagerduty"
@@ -16,28 +19,19 @@ import (
 
 func resourcePagerDutyService() *schema.Resource {
 	return &schema.Resource{
-		Create: resourcePagerDutyServiceCreate,
-		Read:   resourcePagerDutyServiceRead,
-		Update: resourcePagerDutyServiceUpdate,
-		Delete: resourcePagerDutyServiceDelete,
-		CustomizeDiff: func(context context.Context, diff *schema.ResourceDiff, i interface{}) error {
-			in := diff.Get("incident_urgency_rule.#").(int)
-			for i := 0; i <= in; i++ {
-				t := diff.Get(fmt.Sprintf("incident_urgency_rule.%d.type", i)).(string)
-				if t == "use_support_hours" && diff.Get(fmt.Sprintf("incident_urgency_rule.%d.urgency", i)).(string) != "" {
-					return fmt.Errorf("general urgency cannot be set for a use_support_hours incident urgency rule type")
-				}
-			}
-			return nil
-		},
+		Create:        resourcePagerDutyServiceCreate,
+		Read:          resourcePagerDutyServiceRead,
+		Update:        resourcePagerDutyServiceUpdate,
+		Delete:        resourcePagerDutyServiceDelete,
+		CustomizeDiff: customizePagerDutyServiceDiff,
 		Importer: &schema.ResourceImporter{
-			State: schema.ImportStatePassthrough,
+			StateContext: schema.ImportStatePassthroughContext,
 		},
 		Schema: map[string]*schema.Schema{
 			"name": {
-				Type:         schema.TypeString,
-				Required:     true,
-				ValidateFunc: validation.StringDoesNotMatch(regexp.MustCompile(`^$|^[ ]+$|[/\\<>&]`), "Service name can't be blank or contain '\\', '/', '&', '<', '>' or non-printable characters. "),
+				Type:             schema.TypeString,
+				Required:         true,
+				ValidateDiagFunc: validateIsAllowedString(NoNonPrintableChars),
 			},
 			"html_url": {
 				Type:     schema.TypeString,
@@ -51,8 +45,11 @@ func resourcePagerDutyService() *schema.Resource {
 			"alert_creation": {
 				Type:     schema.TypeString,
 				Optional: true,
-				Default:  "create_incidents",
-				ValidateFunc: validateValueFunc([]string{
+				DiffSuppressFunc: func(k, oldValue, newValue string, d *schema.ResourceData) bool {
+					// Once migrated, alert_creation arguments previously defined as create_incidents would have been reported diffs for all matching services. As this is no longer configurable, opt to suppress this diff.
+					return true
+				},
+				ValidateDiagFunc: validateValueDiagFunc([]string{
 					"create_alerts_and_incidents",
 					"create_incidents",
 				}),
@@ -61,7 +58,7 @@ func resourcePagerDutyService() *schema.Resource {
 				Type:     schema.TypeString,
 				Computed: true,
 				Optional: true,
-				ValidateFunc: validateValueFunc([]string{
+				ValidateDiagFunc: validateValueDiagFunc([]string{
 					"time",
 					"intelligent",
 					"rules",
@@ -79,14 +76,16 @@ func resourcePagerDutyService() *schema.Resource {
 			"alert_grouping_parameters": {
 				Type:          schema.TypeList,
 				Optional:      true,
+				Computed:      true,
 				MaxItems:      1,
+				Deprecated:    "Use a resource `pagerduty_alert_grouping_setting` instead.\nFollow the migration guide at https://registry.terraform.io/providers/PagerDuty/pagerduty/latest/docs/resources/alert_grouping_setting#migration-from-alert_grouping_parameters",
 				ConflictsWith: []string{"alert_grouping", "alert_grouping_timeout"},
 				Elem: &schema.Resource{
 					Schema: map[string]*schema.Schema{
 						"type": {
 							Type:     schema.TypeString,
 							Optional: true,
-							ValidateFunc: validateValueFunc([]string{
+							ValidateDiagFunc: validateValueDiagFunc([]string{
 								"time",
 								"intelligent",
 								"content_based",
@@ -95,6 +94,7 @@ func resourcePagerDutyService() *schema.Resource {
 						"config": {
 							Type:     schema.TypeList,
 							Optional: true,
+							Computed: true,
 							MaxItems: 1,
 							Elem: &schema.Resource{
 								Schema: map[string]*schema.Schema{
@@ -112,13 +112,40 @@ func resourcePagerDutyService() *schema.Resource {
 									"aggregate": {
 										Type:     schema.TypeString,
 										Optional: true,
-										ValidateFunc: validateValueFunc([]string{
+										ValidateDiagFunc: validateValueDiagFunc([]string{
 											"all",
 											"any",
 										}),
 									},
+									"time_window": {
+										Type:             schema.TypeInt,
+										Optional:         true,
+										Computed:         true,
+										ValidateDiagFunc: validateTimeWindow,
+									},
 								},
 							},
+						},
+					},
+				},
+			},
+			"auto_pause_notifications_parameters": {
+				Type:     schema.TypeList,
+				Optional: true,
+				Computed: true,
+				MaxItems: 1,
+				Elem: &schema.Resource{
+					Schema: map[string]*schema.Schema{
+						"enabled": {
+							Type:     schema.TypeBool,
+							Optional: true,
+							Computed: true,
+						},
+						"timeout": {
+							Type:             schema.TypeInt,
+							Optional:         true,
+							Computed:         true,
+							ValidateDiagFunc: validation.ToDiagFunc(validation.IntInSlice([]int{120, 180, 300, 600, 900})),
 						},
 					},
 				},
@@ -216,15 +243,9 @@ func resourcePagerDutyService() *schema.Resource {
 							Optional: true,
 						},
 						"time_zone": {
-							Type:     schema.TypeString,
-							Optional: true,
-							ValidateFunc: func(val interface{}, key string) (warns []string, errs []error) {
-								_, err := time.LoadLocation(val.(string))
-								if err != nil {
-									errs = append(errs, err)
-								}
-								return
-							},
+							Type:             schema.TypeString,
+							Optional:         true,
+							ValidateDiagFunc: util.ValidateTZValueDiagFunc,
 						},
 						"start_time": {
 							Type:     schema.TypeString,
@@ -280,8 +301,86 @@ func resourcePagerDutyService() *schema.Resource {
 				Type:     schema.TypeString,
 				Computed: true,
 			},
+			"response_play": {
+				Type:     schema.TypeString,
+				Optional: true,
+				Computed: true,
+			},
 		},
 	}
+}
+
+func customizePagerDutyServiceDiff(context context.Context, diff *schema.ResourceDiff, i interface{}) error {
+	in := diff.Get("incident_urgency_rule.#").(int)
+	for i := 0; i <= in; i++ {
+		t := diff.Get(fmt.Sprintf("incident_urgency_rule.%d.type", i)).(string)
+		if t == "use_support_hours" && diff.Get(fmt.Sprintf("incident_urgency_rule.%d.urgency", i)).(string) != "" {
+			return fmt.Errorf("general urgency cannot be set for a use_support_hours incident urgency rule type")
+		}
+	}
+
+	incidentUrgencyRuleType := diff.Get("incident_urgency_rule.0.type").(string)
+	if incidentUrgencyRuleType == "use_support_hours" {
+		if diff.Get("support_hours.#").(int) != 1 {
+			return fmt.Errorf("when using type = use_support_hours in incident_urgency_rule you must specify exactly one (otherwise optional) support_hours block")
+		}
+	}
+
+	// Due to alert_grouping_parameters.type = null is a valid configuration
+	// for disabling Service's Alert Grouping configuration and having an
+	// empty alert_grouping_parameters.config block is also valid, API ignore
+	// this input fields, and turns out that API response for Service
+	// configuration doesn't bring a representation of this HCL, which leads
+	// to a permadiff, described in
+	// https://github.com/PagerDuty/terraform-provider-pagerduty/issues/700
+	//
+	// So, bellow is the formated representation alert_grouping_parameters
+	// value when this permadiff appears and must be ignored.
+	ignoreThisAlertGroupingParamsConfigDiff := `[]interface {}{map[string]interface {}{"config":[]interface {}{interface {}(nil)}, "type":""}}`
+	if agpdiff, ok := diff.Get("alert_grouping_parameters").([]interface{}); ok && diff.NewValueKnown("alert_grouping_parameters") && fmt.Sprintf("%#v", agpdiff) == ignoreThisAlertGroupingParamsConfigDiff {
+		diff.Clear("alert_grouping_parameters")
+	}
+
+	if agpType, ok := diff.Get("alert_grouping_parameters.0.type").(string); ok {
+		agppath := "alert_grouping_parameters.0.config.0."
+		timeoutVal := diff.Get(agppath + "timeout").(int)
+		aggregateVal := diff.Get(agppath + "aggregate").(string)
+		fieldsVal := diff.Get(agppath + "fields").([]interface{})
+		timeWindowVal := diff.Get(agppath + "time_window").(int)
+		hasChangeAgpType := diff.HasChange("alert_grouping_parameters")
+
+		if agpType == "content_based" && (aggregateVal == "" || len(fieldsVal) == 0) {
+			return fmt.Errorf("When using Alert grouping parameters configuration of type \"content_based\" is in use, attributes \"aggregate\" and \"fields\" are required")
+		}
+		if timeWindowVal == 86400 && agpType != "content_based" {
+			return fmt.Errorf("Alert grouping parameters configuration attribute \"time_window\" with a value of 86400 is only supported by \"content-based\" type Alert Grouping")
+		}
+		if (aggregateVal != "" || len(fieldsVal) > 0) && (agpType != "" && hasChangeAgpType && agpType != "content_based") {
+			return fmt.Errorf("Alert grouping parameters configuration attributes \"aggregate\" and \"fields\" are only supported by \"content_based\" type Alert Grouping")
+		}
+		if timeoutVal > 0 && (agpType != "" && hasChangeAgpType && agpType != "time") {
+			return fmt.Errorf("Alert grouping parameters configuration attribute \"timeout\" is only supported by \"time\" type Alert Grouping")
+		}
+		if (timeWindowVal > 300) && (agpType != "" && hasChangeAgpType && (agpType != "intelligent" && agpType != "content_based")) {
+			return fmt.Errorf("Alert grouping parameters configuration attribute \"time_window\" is only supported by \"intelligent\" and \"content-based\" type Alert Grouping")
+		}
+	}
+
+	return nil
+}
+
+func validateTimeWindow(v interface{}, p cty.Path) diag.Diagnostics {
+	var diags diag.Diagnostics
+
+	tw := v.(int)
+	if (tw < 300 || tw > 3600) && tw != 86400 {
+		diags = append(diags, diag.Diagnostic{
+			Severity:      diag.Error,
+			Summary:       fmt.Sprintf("Alert grouping time window value must be between 300 and 3600 or exactly 86400(86400 is supported only for content-based alert grouping), current setting is %d", tw),
+			AttributePath: p,
+		})
+	}
+	return diags
 }
 
 func buildServiceStruct(d *schema.ResourceData) (*pagerduty.Service, error) {
@@ -319,14 +418,18 @@ func buildServiceStruct(d *schema.ResourceData) (*pagerduty.Service, error) {
 
 	if attr, ok := d.GetOk("alert_grouping"); ok {
 		ag := attr.(string)
-		service.AlertGrouping = &ag
+		if ag != "rules" {
+			service.AlertGrouping = &ag
+		}
 	}
+
 	if attr, ok := d.GetOk("alert_grouping_parameters"); ok {
 		service.AlertGroupingParameters = expandAlertGroupingParameters(attr)
 	} else {
 		// Clear AlertGroupingParameters as it takes precedence over AlertGrouping and AlertGroupingTimeout which are apparently deprecated (that's not explicitly documented in the API)
 		service.AlertGroupingParameters = nil
 	}
+
 	if attr, ok := d.GetOk("alert_grouping_timeout"); ok {
 		if attr.(string) != "null" {
 			if val, err := strconv.Atoi(attr.(string)); err == nil {
@@ -335,6 +438,9 @@ func buildServiceStruct(d *schema.ResourceData) (*pagerduty.Service, error) {
 				return nil, err
 			}
 		}
+	}
+	if attr, ok := d.GetOk("auto_pause_notifications_parameters"); ok {
+		service.AutoPauseNotificationsParameters = expandAutoPauseNotificationsParameters(attr)
 	}
 
 	if attr, ok := d.GetOk("escalation_policy"); ok {
@@ -358,6 +464,15 @@ func buildServiceStruct(d *schema.ResourceData) (*pagerduty.Service, error) {
 	if attr, ok := d.GetOk("support_hours"); ok {
 		service.SupportHours = expandSupportHours(attr)
 	}
+
+	if attr, ok := d.GetOk("response_play"); ok {
+		if attr.(string) != "null" {
+			service.ResponsePlay = &pagerduty.ResponsePlayReference{
+				ID:   attr.(string),
+				Type: "response_play_reference",
+			}
+		}
+	}
 	return &service, nil
 }
 
@@ -367,24 +482,28 @@ func fetchService(d *schema.ResourceData, meta interface{}, errCallback func(err
 		return err
 	}
 
-	return resource.Retry(2*time.Minute, func() *resource.RetryError {
-		service, _, err := client.Services.Get(d.Id(), &pagerduty.GetServiceOptions{})
+	return retry.Retry(2*time.Minute, func() *retry.RetryError {
+		service, _, err := client.Services.Get(d.Id(), &pagerduty.GetServiceOptions{
+			Includes: []string{"auto_pause_notifications_parameters"},
+		})
 		if err != nil {
 			log.Printf("[WARN] Service read error")
+			if isErrCode(err, http.StatusBadRequest) {
+				return retry.NonRetryableError(err)
+			}
+
 			errResp := errCallback(err, d)
 			if errResp != nil {
-				time.Sleep(2 * time.Second)
-				return resource.RetryableError(errResp)
+				return retry.RetryableError(errResp)
 			}
 
 			return nil
 		}
 
 		if err := flattenService(d, service); err != nil {
-			return resource.NonRetryableError(err)
+			return retry.NonRetryableError(err)
 		}
 		return nil
-
 	})
 }
 
@@ -407,6 +526,10 @@ func resourcePagerDutyServiceCreate(d *schema.ResourceData, meta interface{}) er
 	}
 
 	d.SetId(service.ID)
+
+	// We wait for internal subsystem to sync. Otherwise fields like
+	// alert_grouping_parameters will return empty.
+	time.Sleep(500 * time.Millisecond)
 
 	return fetchService(d, meta, genError)
 }
@@ -431,7 +554,7 @@ func resourcePagerDutyServiceUpdate(d *schema.ResourceData, meta interface{}) er
 
 	updatedService, _, err := client.Services.Update(d.Id(), service)
 	if err != nil {
-		return err
+		return handleNotFoundError(err, d)
 	}
 
 	return flattenService(d, updatedService)
@@ -446,7 +569,7 @@ func resourcePagerDutyServiceDelete(d *schema.ResourceData, meta interface{}) er
 	log.Printf("[INFO] Deleting PagerDuty service %s", d.Id())
 
 	if _, err := client.Services.Delete(d.Id()); err != nil {
-		return err
+		return handleNotFoundError(err, d)
 	}
 
 	d.SetId("")
@@ -484,11 +607,21 @@ func flattenService(d *schema.ResourceData, service *pagerduty.Service) error {
 	} else {
 		d.Set("alert_grouping_timeout", strconv.Itoa(*service.AlertGroupingTimeout))
 	}
-	if _, ok := d.GetOk("alert_grouping_parameters"); ok && service.AlertGroupingParameters != nil {
+
+	_, hasGrouping := d.GetOk("alert_grouping")
+	_, hasGroupingParams := d.GetOk("alert_grouping_parameters")
+	if service.AlertGroupingParameters != nil && (!hasGrouping && hasGroupingParams) {
 		if err := d.Set("alert_grouping_parameters", flattenAlertGroupingParameters(service.AlertGroupingParameters)); err != nil {
 			return err
 		}
 	}
+
+	if service.AutoPauseNotificationsParameters != nil {
+		if err := d.Set("auto_pause_notifications_parameters", flattenAutoPauseNotificationsParameters(service.AutoPauseNotificationsParameters)); err != nil {
+			return err
+		}
+	}
+
 	if service.IncidentUrgencyRule != nil {
 		if err := d.Set("incident_urgency_rule", flattenIncidentUrgencyRule(service.IncidentUrgencyRule)); err != nil {
 			return err
@@ -506,6 +639,9 @@ func flattenService(d *schema.ResourceData, service *pagerduty.Service) error {
 			return err
 		}
 	}
+	if service.ResponsePlay != nil {
+		d.Set("response_play", service.ResponsePlay.ID)
+	}
 	return nil
 }
 
@@ -515,46 +651,89 @@ func expandAlertGroupingParameters(v interface{}) *pagerduty.AlertGroupingParame
 	}
 	// First We capture a possible nil value for the interface to avoid the a
 	// panic
-	pre := v.([]interface{})[0]
-	if isNilFunc(pre) {
+	ragp, ok := v.([]interface{})
+	if !ok || isNilFunc(ragp[0]) {
 		return nil
 	}
-	riur := pre.(map[string]interface{})
-	if len(riur["type"].(string)) > 0 {
-		gt := riur["type"].(string)
-		alertGroupingParameters.Type = &gt
+	ragpVal := ragp[0].(map[string]interface{})
+	groupingType := ""
+	if ragpVal["type"].(string) != "" {
+		groupingType = ragpVal["type"].(string)
+		alertGroupingParameters.Type = &groupingType
 	}
 
-	if val, ok := riur["config"]; ok {
-		alertGroupingParameters.Config = expandAlertGroupingConfig(val)
+	alertGroupingParameters.Config = expandAlertGroupingConfig(groupingType, ragpVal["config"])
+	if groupingType == "content_based" && alertGroupingParameters.Config != nil {
+		alertGroupingParameters.Config.Timeout = nil
 	}
 	return alertGroupingParameters
 }
 
-func expandAlertGroupingConfig(v interface{}) *pagerduty.AlertGroupingConfig {
+func expandAutoPauseNotificationsParameters(v interface{}) *pagerduty.AutoPauseNotificationsParameters {
+	autoPauseNotificationsParameters := &pagerduty.AutoPauseNotificationsParameters{}
+	riur := make(map[string]interface{})
+
+	data, ok := v.([]interface{})
+	if ok && len(data) > 0 && !isNilFunc(data[0]) {
+		riur = data[0].(map[string]interface{})
+	} else {
+		return autoPauseNotificationsParameters
+	}
+
+	autoPauseNotificationsParameters.Enabled = riur["enabled"].(bool)
+	if autoPauseNotificationsParameters.Enabled {
+		timeout := riur["timeout"].(int)
+		autoPauseNotificationsParameters.Timeout = &timeout
+	}
+	return autoPauseNotificationsParameters
+}
+
+func expandAlertGroupingConfig(groupingType string, v interface{}) *pagerduty.AlertGroupingConfig {
 	alertGroupingConfig := &pagerduty.AlertGroupingConfig{}
-	if len(v.([]interface{})) == 0 || v.([]interface{})[0] == nil {
+	rconfig := v.([]interface{})
+	if len(rconfig) == 0 || rconfig[0] == nil {
 		return nil
 	}
-	riur := v.([]interface{})[0].(map[string]interface{})
+	config := rconfig[0].(map[string]interface{})
 
-	if val, ok := riur["fields"]; ok {
-		for _, field := range val.([]interface{}) {
-			alertGroupingConfig.Fields = append(alertGroupingConfig.Fields, field.(string))
+	if groupingType == "time" {
+		if val, ok := config["timeout"]; ok {
+			to := val.(int)
+			alertGroupingConfig.Timeout = &to
 		}
 	}
-	if val, ok := riur["aggregate"]; ok {
-		agg := val.(string)
-		alertGroupingConfig.Aggregate = &agg
+
+	if groupingType == "intelligent" || groupingType == "content_based" {
+		if val, ok := config["time_window"]; ok {
+			to := val.(int)
+			alertGroupingConfig.TimeWindow = &to
+		}
 	}
-	if val, ok := riur["timeout"]; ok {
-		to := val.(int)
-		alertGroupingConfig.Timeout = &to
+
+	if groupingType == "content_based" {
+		alertGroupingConfig.Fields = []string{}
+		if val, ok := config["fields"]; ok {
+			for _, field := range val.([]interface{}) {
+				alertGroupingConfig.Fields = append(alertGroupingConfig.Fields, field.(string))
+			}
+		}
+		if val, ok := config["aggregate"]; ok {
+			agg := val.(string)
+			alertGroupingConfig.Aggregate = &agg
+		}
 	}
+
 	return alertGroupingConfig
 }
+
 func flattenAlertGroupingParameters(v *pagerduty.AlertGroupingParameters) interface{} {
-	alertGroupingParameters := map[string]interface{}{"type": "", "config": []map[string]interface{}{{"aggregate": nil, "fields": nil, "timeout": nil}}}
+	alertGroupingParameters := map[string]interface{}{}
+
+	if v.Config == nil && v.Type == nil {
+		return []interface{}{alertGroupingParameters}
+	} else {
+		alertGroupingParameters = map[string]interface{}{"type": "", "config": []map[string]interface{}{{"aggregate": nil, "fields": nil, "timeout": nil, "time_window": nil}}}
+	}
 
 	if v.Type != nil {
 		alertGroupingParameters["type"] = v.Type
@@ -566,21 +745,44 @@ func flattenAlertGroupingParameters(v *pagerduty.AlertGroupingParameters) interf
 
 	return []interface{}{alertGroupingParameters}
 }
-func flattenAlertGroupingConfig(v *pagerduty.AlertGroupingConfig) interface{} {
 
+func flattenAlertGroupingConfig(v *pagerduty.AlertGroupingConfig) interface{} {
 	alertGroupingConfig := map[string]interface{}{
-		"aggregate": v.Aggregate,
-		"fields":    v.Fields,
-		"timeout":   v.Timeout,
+		"aggregate":   v.Aggregate,
+		"fields":      v.Fields,
+		"timeout":     v.Timeout,
+		"time_window": v.TimeWindow,
 	}
 
 	return []interface{}{alertGroupingConfig}
 }
-func expandIncidentUrgencyRule(v interface{}) *pagerduty.IncidentUrgencyRule {
-	riur := v.([]interface{})[0].(map[string]interface{})
-	incidentUrgencyRule := &pagerduty.IncidentUrgencyRule{
-		Type: riur["type"].(string),
+
+func flattenAutoPauseNotificationsParameters(v *pagerduty.AutoPauseNotificationsParameters) []interface{} {
+	autoPauseNotificationsParameters := map[string]interface{}{
+		"enabled": v.Enabled,
 	}
+	if v.Enabled {
+		autoPauseNotificationsParameters["timeout"] = v.Timeout
+	}
+	if !v.Enabled && v.Timeout == nil {
+		autoPauseNotificationsParameters["timeout"] = 120
+	}
+
+	return []interface{}{autoPauseNotificationsParameters}
+}
+
+func expandIncidentUrgencyRule(v interface{}) *pagerduty.IncidentUrgencyRule {
+	incidentUrgencyRule := &pagerduty.IncidentUrgencyRule{}
+	riur := make(map[string]interface{})
+
+	data, ok := v.([]interface{})
+	if ok && len(data) > 0 && !isNilFunc(data[0]) {
+		riur = data[0].(map[string]interface{})
+	} else {
+		return incidentUrgencyRule
+	}
+
+	incidentUrgencyRule.Type = riur["type"].(string)
 
 	if val, ok := riur["urgency"]; ok {
 		incidentUrgencyRule.Urgency = val.(string)
@@ -619,8 +821,15 @@ func flattenIncidentUrgencyRule(v *pagerduty.IncidentUrgencyRule) []interface{} 
 }
 
 func expandIncidentUrgencyType(v interface{}) *pagerduty.IncidentUrgencyType {
-	riut := v.([]interface{})[0].(map[string]interface{})
 	incidentUrgencyType := &pagerduty.IncidentUrgencyType{}
+	riut := make(map[string]interface{})
+
+	data, ok := v.([]interface{})
+	if ok && len(data) > 0 && !isNilFunc(data[0]) {
+		riut = data[0].(map[string]interface{})
+	} else {
+		return incidentUrgencyType
+	}
 
 	if v, ok := riut["type"]; ok {
 		incidentUrgencyType.Type = v.(string)
@@ -644,7 +853,14 @@ func flattenIncidentUrgencyType(v *pagerduty.IncidentUrgencyType) []interface{} 
 func expandSupportHours(v interface{}) *pagerduty.SupportHours {
 	supportHours := &pagerduty.SupportHours{}
 
-	rsh := v.([]interface{})[0].(map[string]interface{})
+	rsh := make(map[string]interface{})
+
+	data, ok := v.([]interface{})
+	if ok && len(data) > 0 && !isNilFunc(data[0]) {
+		rsh = data[0].(map[string]interface{})
+	} else {
+		return supportHours
+	}
 
 	if v, ok := rsh["type"]; ok {
 		supportHours.Type = v.(string)
@@ -735,7 +951,15 @@ func flattenScheduledActions(v []*pagerduty.ScheduledAction) []interface{} {
 }
 
 func expandScheduledActionAt(v interface{}) *pagerduty.At {
-	rat := v.([]interface{})[0].(map[string]interface{})
+	rat := make(map[string]interface{})
+
+	data, ok := v.([]interface{})
+	if ok && len(data) > 0 && !isNilFunc(data[0]) {
+		rat = data[0].(map[string]interface{})
+	} else {
+		return nil
+	}
+
 	return &pagerduty.At{
 		Type: rat["type"].(string),
 		Name: rat["name"].(string),

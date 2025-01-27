@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/acctest"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/terraform"
+	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
+	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/terraform"
 )
 
 func TestAccPagerDutyEventOrchestrationPathService_import(t *testing.T) {
@@ -22,10 +22,11 @@ func TestAccPagerDutyEventOrchestrationPathService_import(t *testing.T) {
 				Config: testAccCheckPagerDutyEventOrchestrationPathServiceAllActionsConfig(escalationPolicy, service),
 			},
 			{
-				ResourceName:      "pagerduty_event_orchestration_service.serviceA",
-				ImportStateIdFunc: testAccCheckPagerDutyEventOrchestrationPathServiceID,
-				ImportState:       true,
-				ImportStateVerify: true,
+				ResourceName:            "pagerduty_event_orchestration_service.serviceA",
+				ImportStateIdFunc:       testAccCheckPagerDutyEventOrchestrationPathServiceID,
+				ImportState:             true,
+				ImportStateVerify:       true,
+				ImportStateVerifyIgnore: []string{"enable_event_orchestration_for_service"},
 			},
 		},
 	})

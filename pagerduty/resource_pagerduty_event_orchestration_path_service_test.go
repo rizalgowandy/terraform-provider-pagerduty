@@ -1,13 +1,14 @@
 package pagerduty
 
 import (
+	"context"
 	"fmt"
 	"regexp"
 	"testing"
 
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/acctest"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/terraform"
+	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
+	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/terraform"
 )
 
 func init() {
@@ -26,7 +27,7 @@ func TestAccPagerDutyEventOrchestrationPathService_Basic(t *testing.T) {
 
 	// Checks that run on every step except the last one. These checks that verify the existance of the resource
 	// and computed/default attributes. We're not checking individual resource attributes because
-	// according to the official docs (https://pkg.go.dev/github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource#TestCheckResourceAttr)
+	// according to the official docs (https://pkg.go.dev/github.com/hashicorp/terraform-plugin-testing/helper/resource#TestCheckResourceAttr)
 	// "State value checking is only recommended for testing Computed attributes and attribute defaults."
 	baseChecks := []resource.TestCheckFunc{
 		testAccCheckPagerDutyEventOrchestrationPathServiceExists(resourceName),
@@ -134,6 +135,9 @@ func TestAccPagerDutyEventOrchestrationPathService_Basic(t *testing.T) {
 							resource.TestCheckResourceAttrSet(resourceName, "set.0.rule.0.id"),
 							resource.TestCheckResourceAttrSet(resourceName, "set.1.rule.0.id"),
 							resource.TestCheckResourceAttrSet(resourceName, "set.1.rule.1.id"),
+							resource.TestCheckResourceAttr(
+								resourceName, "set.0.rule.0.actions.0.escalation_policy", "POLICY3",
+							),
 						}...,
 					)...,
 				),
@@ -167,6 +171,69 @@ func TestAccPagerDutyEventOrchestrationPathService_Basic(t *testing.T) {
 					testAccCheckPagerDutyEventOrchestrationServicePathNotExists(resourceName),
 				),
 			},
+			// Adding/Updating/Removing `enable_event_orchestration_for_service` attribute
+			{
+				Config: testAccCheckPagerDutyEventOrchestrationPathServiceDefaultConfig(escalationPolicy, service),
+				Check: resource.ComposeTestCheckFunc(
+					append(
+						baseChecks,
+						resource.TestCheckNoResourceAttr(resourceName, "enable_event_orchestration_for_service"),
+					)...,
+				),
+			},
+			{
+				Config: testAccCheckPagerDutyEventOrchestrationPathServiceEnableEOForServiceEnableUpdateConfig(escalationPolicy, service),
+				Check: resource.ComposeTestCheckFunc(
+					append(
+						baseChecks,
+						resource.TestCheckResourceAttr(resourceName, "enable_event_orchestration_for_service", "true"),
+					)...,
+				),
+			},
+			{
+				Config: testAccCheckPagerDutyEventOrchestrationPathServiceEnableEOForServiceDisableUpdateConfig(escalationPolicy, service),
+				Check: resource.ComposeTestCheckFunc(
+					append(
+						baseChecks,
+						resource.TestCheckResourceAttr(resourceName, "enable_event_orchestration_for_service", "false"),
+					)...,
+				),
+			},
+			{
+				Config: testAccCheckPagerDutyEventOrchestrationPathServiceEnableEOForServiceEnableUpdateConfig(escalationPolicy, service),
+				Check: resource.ComposeTestCheckFunc(
+					append(
+						baseChecks,
+						resource.TestCheckResourceAttr(resourceName, "enable_event_orchestration_for_service", "true"),
+					)...,
+				),
+			},
+			{
+				Config: testAccCheckPagerDutyEventOrchestrationPathServiceResourceDeleteConfig(escalationPolicy, service),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckPagerDutyEventOrchestrationServicePathNotExists(resourceName),
+				),
+			},
+			// Disabling Service Orchestration at creation by setting
+			// `enable_event_orchestration_for_service`  attribute to false
+			{
+				Config: testAccCheckPagerDutyEventOrchestrationPathServiceEnableEOForServiceDisableUpdateConfig(escalationPolicy, service),
+				Check: resource.ComposeTestCheckFunc(
+					append(
+						baseChecks,
+						resource.TestCheckResourceAttr(resourceName, "enable_event_orchestration_for_service", "false"),
+					)...,
+				),
+			},
+			{
+				Config: testAccCheckPagerDutyEventOrchestrationPathServiceDefaultConfig(escalationPolicy, service),
+				Check: resource.ComposeTestCheckFunc(
+					append(
+						baseChecks,
+						resource.TestCheckResourceAttr(resourceName, "enable_event_orchestration_for_service", "false"),
+					)...,
+				),
+			},
 		},
 	})
 }
@@ -180,7 +247,7 @@ func testAccCheckPagerDutyEventOrchestrationServicePathDestroy(s *terraform.Stat
 
 		srv := s.RootModule().Resources["pagerduty_service.bar"]
 
-		if _, _, err := client.EventOrchestrationPaths.Get(srv.Primary.ID, "service"); err == nil {
+		if _, _, err := client.EventOrchestrationPaths.GetContext(context.Background(), srv.Primary.ID, "service"); err == nil {
 			return fmt.Errorf("Event Orchestration Service Path still exists")
 		}
 	}
@@ -198,7 +265,7 @@ func testAccCheckPagerDutyEventOrchestrationPathServiceExists(rn string) resourc
 		}
 
 		client, _ := testAccProvider.Meta().(*Config).Client()
-		found, _, err := client.EventOrchestrationPaths.Get(orch.Primary.ID, "service")
+		found, _, err := client.EventOrchestrationPaths.GetContext(context.Background(), orch.Primary.ID, "service")
 		if err != nil {
 			return err
 		}
@@ -281,7 +348,7 @@ func testAccCheckPagerDutyEventOrchestrationPathServiceDefaultConfig(ep, s strin
 	return fmt.Sprintf("%s%s", createBaseServicePathConfig(ep, s),
 		`resource "pagerduty_event_orchestration_service" "serviceA" {
 			service = pagerduty_service.bar.id
-		
+
 			set {
 				id = "start"
 			}
@@ -297,17 +364,17 @@ func testAccCheckPagerDutyEventOrchestrationPathServiceAutomationActionsConfig(e
 	return fmt.Sprintf("%s%s", createBaseServicePathConfig(ep, s),
 		`resource "pagerduty_event_orchestration_service" "serviceA" {
 			service = pagerduty_service.bar.id
-		
+
 			set {
 				id = "start"
 				rule {
 					label = "rule 1"
-					actions {							
+					actions {
 							automation_action {
 								name = "test"
 								url = "https://test.com"
 								auto_send = true
-		
+
 								header {
 									key = "foo"
 									value = "bar"
@@ -316,7 +383,7 @@ func testAccCheckPagerDutyEventOrchestrationPathServiceAutomationActionsConfig(e
 									key = "baz"
 									value = "buz"
 								}
-		
+
 								parameter {
 									key = "source"
 									value = "orch"
@@ -365,16 +432,16 @@ func testAccCheckPagerDutyEventOrchestrationPathServiceAutomationActionsParamsUp
 	return fmt.Sprintf("%s%s", createBaseServicePathConfig(ep, s),
 		`resource "pagerduty_event_orchestration_service" "serviceA" {
 			service = pagerduty_service.bar.id
-		
+
 			set {
 				id = "start"
 				rule {
 					label = "rule 1"
-					actions {							
+					actions {
 							automation_action {
 								name = "test1"
 								url = "https://test1.com"
-		
+
 								header {
 									key = "foo1"
 									value = "bar1"
@@ -414,12 +481,12 @@ func testAccCheckPagerDutyEventOrchestrationPathServiceAutomationActionsParamsDe
 	return fmt.Sprintf("%s%s", createBaseServicePathConfig(ep, s),
 		`resource "pagerduty_event_orchestration_service" "serviceA" {
 			service = pagerduty_service.bar.id
-		
+
 			set {
 				id = "start"
 				rule {
 					label = "rule 1"
-					actions {							
+					actions {
 							automation_action {
 								name = "test"
 								url = "https://test.com"
@@ -446,7 +513,7 @@ func testAccCheckPagerDutyEventOrchestrationPathServiceInvalidExtractionsConfig(
 		createBaseServicePathConfig(ep, s),
 		fmt.Sprintf(`resource "pagerduty_event_orchestration_service" "serviceA" {
 				service = pagerduty_service.bar.id
-						
+
 				set {
 					id = "start"
 					rule {
@@ -469,7 +536,7 @@ func testAccCheckPagerDutyEventOrchestrationPathServiceAllActionsConfig(ep, s st
 	return fmt.Sprintf("%s%s", createBaseServicePathConfig(ep, s),
 		`resource "pagerduty_event_orchestration_service" "serviceA" {
 			service = pagerduty_service.bar.id
-		
+
 			set {
 				id = "start"
 				rule {
@@ -483,6 +550,7 @@ func testAccCheckPagerDutyEventOrchestrationPathServiceAllActionsConfig(ep, s st
 					actions {
 						route_to = "set-1"
 						priority = "P0IN2KQ"
+						escalation_policy = pagerduty_escalation_policy.foo.id
 						annotate = "Routed through an event orchestration"
 						pagerduty_automation_action {
 							action_id = "01CSB5SMOKCKVRI5GN0LJG7SMB"
@@ -510,6 +578,10 @@ func testAccCheckPagerDutyEventOrchestrationPathServiceAllActionsConfig(ep, s st
 							source = "event.group"
 							target = "event.custom_details.message"
 						}
+						incident_custom_field_update {
+							id = "PIJ90N7"
+							value = "foo"
+						}
 					}
 				}
 			}
@@ -536,6 +608,7 @@ func testAccCheckPagerDutyEventOrchestrationPathServiceAllActionsConfig(ep, s st
 				actions {
 					suspend = 120
 					priority = "P0IN2KW"
+					escalation_policy = pagerduty_escalation_policy.foo.id
 					annotate = "Routed through an event orchestration - catch-all rule"
 					pagerduty_automation_action {
 						action_id = "01CSB5SMOKCKVRI5GN0LJG7SMC"
@@ -573,7 +646,7 @@ func testAccCheckPagerDutyEventOrchestrationPathServiceAllActionsUpdateConfig(ep
 	return fmt.Sprintf("%s%s", createBaseServicePathConfig(ep, s),
 		`resource "pagerduty_event_orchestration_service" "serviceA" {
 			service = pagerduty_service.bar.id
-		
+
 			set {
 				id = "start"
 				rule {
@@ -584,6 +657,7 @@ func testAccCheckPagerDutyEventOrchestrationPathServiceAllActionsUpdateConfig(ep
 					actions {
 						route_to = "set-2"
 						priority = "P0IN2KR"
+						escalation_policy = "POLICY3"
 						annotate = "Routed through a service orchestration!"
 						pagerduty_automation_action {
 							action_id = "01CSB5SMOKCKVRI5GN0LJG7SMBUPDATED"
@@ -604,6 +678,10 @@ func testAccCheckPagerDutyEventOrchestrationPathServiceAllActionsUpdateConfig(ep
 						extraction {
 							target = "event.custom_details.message_upd"
 							template = "[UPD] High CPU usage on {{variables.hostname}}: {{variables.cpu_val}}"
+						}
+						incident_custom_field_update {
+							id = "PIJ90N7"
+							value = "bar"
 						}
 					}
 				}
@@ -650,8 +728,8 @@ func testAccCheckPagerDutyEventOrchestrationPathServiceAllActionsUpdateConfig(ep
 			catch_all {
 				actions {
 					suspend = 360
-					suppress = true
 					priority = "P0IN2KX"
+					escalation_policy = "POLICY4"
 					annotate = "[UPD] Routed through an event orchestration - catch-all rule"
 					pagerduty_automation_action {
 						action_id = "01CSB5SMOKCKVRI5GN0LJG7SMD"
@@ -663,7 +741,7 @@ func testAccCheckPagerDutyEventOrchestrationPathServiceAllActionsUpdateConfig(ep
 						path = "event.custom_details.updated_at"
 						type = "regex"
 						value = "UPD (.*)"
-					}					
+					}
 					extraction {
 						regex = ".*"
 						source = "event.custom_details.region_upd"
@@ -679,7 +757,7 @@ func testAccCheckPagerDutyEventOrchestrationPathServiceAllActionsDeleteConfig(ep
 	return fmt.Sprintf("%s%s", createBaseServicePathConfig(ep, s),
 		`resource "pagerduty_event_orchestration_service" "serviceA" {
 			service = pagerduty_service.bar.id
-		
+
 			set {
 				id = "start"
 				rule {
@@ -712,7 +790,7 @@ func testAccCheckPagerDutyEventOrchestrationPathServiceOneSetNoActionsConfig(ep,
 	return fmt.Sprintf("%s%s", createBaseServicePathConfig(ep, s),
 		`resource "pagerduty_event_orchestration_service" "serviceA" {
 			service = pagerduty_service.bar.id
-		
+
 			set {
 				id = "start"
 				rule {
@@ -730,4 +808,38 @@ func testAccCheckPagerDutyEventOrchestrationPathServiceOneSetNoActionsConfig(ep,
 
 func testAccCheckPagerDutyEventOrchestrationPathServiceResourceDeleteConfig(ep, s string) string {
 	return createBaseServicePathConfig(ep, s)
+}
+
+func testAccCheckPagerDutyEventOrchestrationPathServiceEnableEOForServiceEnableUpdateConfig(ep, s string) string {
+	return fmt.Sprintf("%s%s", createBaseServicePathConfig(ep, s),
+		`resource "pagerduty_event_orchestration_service" "serviceA" {
+			service = pagerduty_service.bar.id
+      enable_event_orchestration_for_service = true
+
+			set {
+				id = "start"
+			}
+
+			catch_all {
+				actions { }
+			}
+		}
+	`)
+}
+
+func testAccCheckPagerDutyEventOrchestrationPathServiceEnableEOForServiceDisableUpdateConfig(ep, s string) string {
+	return fmt.Sprintf("%s%s", createBaseServicePathConfig(ep, s),
+		`resource "pagerduty_event_orchestration_service" "serviceA" {
+			service = pagerduty_service.bar.id
+      enable_event_orchestration_for_service = false
+
+			set {
+				id = "start"
+			}
+
+			catch_all {
+				actions { }
+			}
+		}
+	`)
 }
